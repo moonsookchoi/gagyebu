@@ -13,3 +13,7 @@
 
 위의 **가계부 바로 열기** 링크를 누르면 바로 쓸 수 있어요.
 로그인이 없어서 사이트 주소를 아는 누구나 내역을 보고 지울 수 있어요.
+
+## 함께 만든 프로젝트
+
+- 🍠 [고구마마켓](https://github.com/moonsookchoi/goguma-market) — 우리 동네 중고거래 사이트 (Next.js + Supabase). 이 가계부와 같은 Supabase 프로젝트를 써요.
