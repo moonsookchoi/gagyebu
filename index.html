@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>가계부</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <style>
   :root {
     --bg: #f4f5f9;
@@ -208,7 +209,7 @@
       </div>
 
       <div class="card">
-        <h2 class="card-title">데이터 관리 <small>이 브라우저에만 저장돼요</small></h2>
+        <h2 class="card-title">데이터 관리 <small id="syncStatus">불러오는 중…</small></h2>
         <div class="tools">
           <button id="exportBtn">JSON 백업</button>
           <button id="importBtn">JSON 불러오기</button>
@@ -253,7 +254,13 @@
 <div class="toast" id="toast"></div>
 
 <script>
-const KEY = 'gagyebu.entries';
+// Supabase 설정 (publishable 키는 브라우저 공개용 키예요)
+const SUPABASE_URL = 'https://jazfkgxdotdwhzlpcunu.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_VpFBQVWw60xb1DxoUWSAwQ_9c2WL-Z8';
+const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const TABLE = 'entries';
+const LOCAL_KEY = 'gagyebu.entries'; // 예전 localStorage 데이터 (이전용)
+
 const CATS = {
   expense: [
     { n: '식비', i: '🍚', c: '#f97316' },
@@ -287,10 +294,51 @@ const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const catInfo = (type, name) => (CATS[type] || CATS.expense).find(c => c.n === name) || { n: name, i: '📦', c: '#64748b' };
 
-function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(entries)); } catch {} }
+/* ---------- Supabase ---------- */
+const COLS = 'id,type,date,category,amount,memo';
+const toRow = e => ({
+  type: e.type === 'income' ? 'income' : 'expense',
+  date: String(e.date).slice(0, 10),
+  category: String(e.category || '기타').slice(0, 20),
+  amount: Math.round(Number(e.amount)),
+  memo: String(e.memo || '').slice(0, 40)
+});
+const fromRow = r => ({ ...r, amount: Number(r.amount) });
 
-let entries = load();
+async function fetchAll() {
+  const all = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await db.from(TABLE).select(COLS).order('date').order('id').range(from, from + 999);
+    if (error) throw error;
+    all.push(...data.map(fromRow));
+    if (data.length < 1000) return all;
+  }
+}
+async function insertMany(list) {
+  const rows = list.map(toRow).filter(r => r.amount > 0 && /^\d{4}-\d{2}-\d{2}$/.test(r.date));
+  const out = [];
+  for (let i = 0; i < rows.length; i += 500) {
+    const { data, error } = await db.from(TABLE).insert(rows.slice(i, i + 500)).select(COLS);
+    if (error) throw error;
+    out.push(...data.map(fromRow));
+  }
+  return out;
+}
+async function deleteAll() {
+  const { error } = await db.from(TABLE).delete().gt('id', 0);
+  if (error) throw error;
+}
+function fail(err) {
+  console.error(err);
+  toast('저장소 연결에 실패했어요: ' + (err.message || err));
+  setStatus('연결 오류', true);
+}
+function setStatus(text, bad) {
+  $('syncStatus').textContent = text;
+  $('syncStatus').style.color = bad ? 'var(--expense)' : '';
+}
+
+let entries = [];
 let viewDate = new Date(); viewDate.setDate(1);
 let type = 'expense';
 let category = CATS.expense[0].n;
@@ -323,14 +371,18 @@ $('amount').addEventListener('input', e => {
   const digits = e.target.value.replace(/[^\d]/g, '').replace(/^0+/, '').slice(0, 12);
   e.target.value = digits ? Number(digits).toLocaleString('ko-KR') : '';
 });
-$('form').addEventListener('submit', e => {
+$('form').addEventListener('submit', async e => {
   e.preventDefault();
   const amount = Number($('amount').value.replace(/[^\d]/g, ''));
   if (!amount) { $('amount').focus(); return; }
   const date = $('date').value || ymd(new Date());
-  const id = Math.max(Date.now(), ...entries.map(x => Number(x.id) + 1 || 0));
-  entries.push({ id, type, date, category, amount, memo: $('memo').value.trim() });
-  save();
+  const btn = e.target.querySelector('.submit');
+  btn.disabled = true;
+  try {
+    const [row] = await insertMany([{ type, date, category, amount, memo: $('memo').value.trim() }]);
+    entries.push(row);
+  } catch (err) { fail(err); return; }
+  finally { btn.disabled = false; }
   const d = parse(date);
   viewDate = new Date(d.getFullYear(), d.getMonth(), 1);
   selectedWeek = null;
@@ -461,11 +513,14 @@ $('filter').addEventListener('click', e => {
   [...$('filter').children].forEach(x => x.classList.toggle('on', x === b));
   render();
 });
-$('list').addEventListener('click', e => {
+$('list').addEventListener('click', async e => {
   const b = e.target.closest('.del'); if (!b) return;
   if (!confirm('이 내역을 삭제할까요?')) return;
-  entries = entries.filter(x => x.id !== Number(b.dataset.id));
-  save(); render(); toast('삭제했어요');
+  const id = Number(b.dataset.id);
+  const { error } = await db.from(TABLE).delete().eq('id', id);
+  if (error) return fail(error);
+  entries = entries.filter(x => x.id !== id);
+  render(); toast('삭제했어요');
 });
 $('prev').addEventListener('click', () => { viewDate.setMonth(viewDate.getMonth() - 1); selectedWeek = null; render(); });
 $('next').addEventListener('click', () => { viewDate.setMonth(viewDate.getMonth() + 1); selectedWeek = null; render(); });
@@ -490,18 +545,44 @@ $('importFile').addEventListener('change', async e => {
     const data = JSON.parse(await f.text());
     if (!Array.isArray(data)) throw 0;
     if (!confirm(`${data.length}건을 불러옵니다. 기존 데이터는 대체돼요. 계속할까요?`)) return;
-    entries = data; save(); render(); toast('불러오기 완료');
-  } catch { alert('올바른 가계부 JSON 파일이 아니에요.'); }
+    await deleteAll();
+    entries = await insertMany(data);
+    render(); toast('불러오기 완료');
+  } catch (err) {
+    if (err instanceof SyntaxError || err === 0) alert('올바른 가계부 JSON 파일이 아니에요.');
+    else fail(err);
+  }
   finally { e.target.value = ''; }
 });
-$('clearBtn').addEventListener('click', () => {
+$('clearBtn').addEventListener('click', async () => {
   if (!confirm('모든 내역을 삭제할까요? 되돌릴 수 없어요.')) return;
-  entries = []; save(); render(); toast('전체 삭제했어요');
+  try { await deleteAll(); } catch (err) { return fail(err); }
+  entries = []; render(); toast('전체 삭제했어요');
 });
 
-$('date').value = ymd(new Date());
-renderCatGrid();
-render();
+// 예전에 이 브라우저(localStorage)에 저장한 내역이 있으면 한 번 옮겨 줌
+async function migrateLocal() {
+  let local = [];
+  try { local = JSON.parse(localStorage.getItem(LOCAL_KEY)) || []; } catch {}
+  if (!Array.isArray(local) || !local.length) return;
+  if (!confirm(`이 브라우저에 저장된 예전 내역 ${local.length}건이 있어요. 서버로 옮길까요?`)) return;
+  entries.push(...await insertMany(local));
+  try { localStorage.removeItem(LOCAL_KEY); } catch {}
+  toast(`${local.length}건을 옮겼어요`);
+}
+
+async function init() {
+  $('date').value = ymd(new Date());
+  renderCatGrid();
+  render();
+  try {
+    entries = await fetchAll();
+    await migrateLocal();
+    setStatus('Supabase에 저장돼요');
+  } catch (err) { fail(err); }
+  render();
+}
+init();
 </script>
 </body>
 </html>
